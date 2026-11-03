@@ -8,6 +8,34 @@
 <script type="module" src="js/main.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
 </head>
+<section id="tela-login">
+  <form id="form-login">
+    <input id="email" type="email" placeholder="E-mail" required>
+    <input id="senha" type="password" placeholder="Senha" required>
+    <button type="submit">Entrar</button>
+    <button type="button" id="btn-cadastrar">Criar conta</button>
+  </form>
+  <p id="msg-login"></p>
+</section>
+
+<section id="tela-app" hidden>
+  <button id="btn-sair">Sair</button>
+  <p>Posso gastar: <strong id="pode-gastar"></strong> (<span id="por-dia"></span>/dia)</p>
+  <p>Ganhos: <span id="ganhos-mes"></span> · Gastos: <span id="gastos-mes"></span></p>
+
+  <form id="form-gasto">
+    <input id="gasto-desc" placeholder="Descrição" required>
+    <input id="gasto-valor" type="number" step="0.01" min="0.01" required>
+    <select id="gasto-categoria"></select>
+    <input id="gasto-data" type="date">
+    <button type="submit">Adicionar gasto</button>
+  </form>
+  <p id="msg-gasto"></p>
+<ul id="lista-gastos"></ul>
+  
+</section>
+
+<script type="module" src="js/main.js"></script>
 <body>
 <script>window.addEventListener("error",function(e){var b=document.getElementById("boot");if(!b){b=document.createElement("p");b.id="boot";b.className="boot";document.body.prepend(b)}b.hidden=false;b.textContent="Erro no site: "+(e.message||"desconhecido")});</script>
 <div id="toasts" aria-live="polite"></div>
