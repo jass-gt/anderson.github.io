@@ -1,0 +1,316 @@
+import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/+esm';
+import { SUPABASE_URL, SUPABASE_ANON_KEY } from './config.js';
+import * as F from './finance.js';
+
+const $ = (s, r = document) => r.querySelector(s);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const configured = SUPABASE_URL && !SUPABASE_URL.includes('SEU-PROJETO');
+const db = configured ? createClient(SUPABASE_URL, SUPABASE_ANON_KEY) : null;
+const q = async p => { const { data, error } = await p; if (error) throw error; return data; };
+const $m = c => F.money(c);
+const $d = s => (s ? s.split('-').reverse().join('/') : '');
+const nn = v => (v === '' || v == null ? null : v);
+const mask = (s, neg) => { const n = neg && String(s).trim().startsWith('-'); const d = String(s).replace(/\D/g, ''); if (!d) return n ? '-' : ''; const c = d.padStart(3, '0'); const int = c.slice(0, -2).replace(/^0+(?=\d)/, '').replace(/\B(?=(\d{3})+(?!\d))/g, '.'); return (n ? '-' : '') + int + ',' + c.slice(-2); };
+const unmask = (o, fields) => { for (const f of fields) if (f.type === 'number' && !f.step && o[f.name] !== undefined && o[f.name] !== '') { const n = parseFloat(String(o[f.name]).replace(/\./g, '').replace(',', '.')); if (!Number.isFinite(n) || n < (f.min ?? 0)) throw new Error(`Informe um valor válido em "${f.label}".`); o[f.name] = String(n); } return o; };
+const S = { user: null, view: 'dashboard', accounts: [], tx: [], inv: [], ops: [], goals: [], prefs: {}, f: { _: {}, expense: {}, income: {} }, err: null };
+
+const NAV = [['dashboard', 'Dashboard'], ['investimentos', 'Investimentos'], ['gastos', 'Gastos do mês'], ['orcamento', 'Quanto posso gastar'], ['ganhos', 'Ganhos da semana'], ['metas', 'Metas'], ['relatorios', 'Relatórios'], ['config', 'Configurações']];
+const CAT = {
+  expense: ['Alimentação', 'Moradia', 'Transporte', 'Saúde', 'Educação', 'Lazer', 'Compras', 'Assinaturas', 'Contas e serviços', 'Impostos e taxas', 'Outros'],
+  income: ['Salário', 'Trabalho extra', 'Serviços', 'Comissões', 'Vendas', 'Rendimentos de investimentos', 'Outros'],
+  inv: ['Renda fixa', 'Ações', 'Fundos imobiliários', 'Fundos de investimento', 'ETFs', 'Criptomoedas', 'Reserva de emergência', 'Outros'],
+};
+const ST = { expense: [['planned', 'Prevista'], ['pending', 'Pendente'], ['settled', 'Paga'], ['canceled', 'Cancelada']], income: [['planned', 'Previsto'], ['settled', 'Recebido'], ['canceled', 'Cancelado']] };
+const TYPE = { income: 'Receita', expense: 'Despesa', transfer: 'Transferência', investment_contribution: 'Aporte', investment_redemption: 'Resgate' };
+const stLabel = (k, s) => (ST[k] || ST.expense).find(x => x[0] === s)?.[1] || s;
+const COLORS = ['#2ecc8f', '#6ea8e8', '#e5707a', '#e0b341', '#a98be8', '#4fd1c5', '#e0833a', '#8fa1b5'];
+
+// ---------- UI helpers ----------
+const toast = (m, err) => { const e = document.createElement('div'); e.className = 'toast' + (err ? ' err' : ''); e.textContent = m; $('#toasts').append(e); setTimeout(() => e.remove(), 4500); };
+const ask = m => new Promise(r => {
+  const d = $('#dlg');
+  d.innerHTML = `<div class="f"><h3>${esc(m)}</h3><div class="row"><button class="ghost" id="n">Voltar</button><button class="btn danger" id="y">Confirmar</button></div></div>`;
+  d.showModal(); $('#n', d).onclick = () => { d.close(); r(false); }; $('#y', d).onclick = () => { d.close(); r(true); };
+});
+function form(title, fields, vals, submit) {
+  const d = $('#dlg');
+  const inp = f => {
+    const v = vals?.[f.name] ?? f.def ?? '';
+    if (f.type === 'select') return `<select name="${f.name}" ${f.req ? 'required' : ''}>${f.options.map(o => { const [k, l] = Array.isArray(o) ? o : [o, o]; return `<option value="${esc(k)}" ${String(v) === String(k) ? 'selected' : ''}>${esc(l)}</option>`; }).join('')}</select>`;
+    if (f.type === 'number' && !f.step) return `<input name="${f.name}" type="text" inputmode="decimal" autocomplete="off" data-money ${f.min < 0 ? 'data-neg' : ''} ${f.req ? 'required' : ''} placeholder="0,00" value="${v === '' ? '' : mask(Number(v).toFixed(2), f.min < 0)}">`;
+    const num = f.type === 'number' ? `step="${f.step || '0.01'}" min="${f.min ?? 0}"` : '';
+    return `<input name="${f.name}" type="${f.type || 'text'}" ${f.req ? 'required' : ''} ${num} value="${esc(v)}">`;
+  };
+  d.innerHTML = `<form class="f"><h3>${esc(title)}</h3>${fields.map(f => `<label>${esc(f.label)}${inp(f)}</label>`).join('')}<p class="err" id="ferr" role="alert"></p><div class="row"><button type="button" class="ghost" id="fc">Cancelar</button><button class="btn" id="fok">Salvar</button></div></form>`;
+  d.showModal(); $('#fc', d).onclick = () => d.close();
+  $('form', d).onsubmit = async e => {
+    e.preventDefault(); const btn = $('#fok', d); btn.disabled = true; btn.textContent = 'Salvando…';
+    try { await submit(unmask(Object.fromEntries(new FormData(e.target)), fields)); d.close(); await refresh(); toast('Salvo com sucesso.'); }
+    catch (x) { $('#ferr', d).textContent = x.message; } finally { btn.disabled = false; btn.textContent = 'Salvar'; }
+  };
+}
+const CH = {};
+const chart = (id, cfg) => { CH[id]?.destroy(); const el = document.getElementById(id); if (el && window.Chart) CH[id] = new Chart(el, cfg); };
+const kpi = (l, v, c = '') => `<div class="card kpi"><small>${l}</small><strong class="${c}">${v}</strong></div>`;
+const sel = (k, f, label, opts) => `<label>${label}<select data-k="${k}" data-f="${f}"><option value="">Todos</option>${opts.map(o => { const [v, l] = Array.isArray(o) ? o : [o, o]; return `<option value="${esc(v)}" ${S.f[k][f] === v ? 'selected' : ''}>${esc(l)}</option>`; }).join('')}</select></label>`;
+const accOpts = () => S.accounts.map(a => [a.id, a.name]);
+const nowStr = () => F.today(S.prefs.timezone);
+
+// ---------- Dados ----------
+async function load() {
+  const u = S.user.id;
+  let [accounts, tx, inv, ops, goals, pf] = await Promise.all(['financial_accounts', 'transactions', 'investments', 'investment_transactions', 'financial_goals', 'user_preferences'].map(t => q(db.from(t).select('*').limit(5000))));
+  if (!accounts.length) accounts = await q(db.from('financial_accounts').insert({ user_id: u, name: 'Conta principal' }).select());
+  if (!pf.length) pf = await q(db.from('user_preferences').insert({ user_id: u }).select());
+  Object.assign(S, { accounts, tx: tx.sort((a, b) => b.occurred_on.localeCompare(a.occurred_on)), inv, ops, goals, prefs: pf[0] });
+}
+async function refresh() { try { await load(); S.err = null; } catch (e) { S.err = e.message; } render(); }
+
+// ---------- Cálculos de tela ----------
+function budget(extra = 0) {
+  const p = S.prefs, t = nowStr(), m = F.monthRange(t), open = { start: '0000-01-01', end: m.end };
+  const pending = F.sumBy(S.tx, { type: 'expense', status: 'pending', range: open }) + F.sumBy(S.tx, { type: 'expense', status: 'planned', range: open });
+  const saved = S.ops.filter(o => F.inRange(o.occurred_on, m)).reduce((a, o) => a + (o.kind === 'aporte' ? 1 : -1) * F.toCents(o.amount), 0);
+  const remainSave = Math.max(0, F.toCents(p.savings_goal || 0) - Math.max(0, saved));
+  const remainInv = Math.max(0, F.toCents(p.investment_reserve || 0) - Math.max(0, saved));
+  const goalsSaved = S.goals.reduce((a, g) => a + F.toCents(g.saved_amount), 0);
+  const input = {
+    balance: F.balances(S.accounts, S.tx).total, pending: pending + F.toCents(extra || 0),
+    reserve: F.toCents(p.emergency_reserve || 0) + goalsSaved + remainInv,
+    paid: F.sumBy(S.tx, { type: 'expense', status: 'settled', range: m }), limit: F.toCents(p.expense_limit || 0),
+    remainingDays: F.daysBetween(t, m.end) + 1,
+    expectedIncome: F.sumBy(S.tx.filter(x => !x.reliable), { type: 'income', status: 'planned', range: { start: t, end: m.end } }),
+  };
+  const reliable = F.sumBy(S.tx.filter(x => x.reliable), { type: 'income', status: 'planned', range: { start: t, end: m.end } });
+  return { ...F.budgetSummary({ ...input, balance: input.balance + reliable }), input, remainSave, reliable, pending: input.pending };
+}
+const invStats = i => F.portfolioStats(S.ops.filter(o => o.investment_id === i.id), i.market_value == null ? null : F.toCents(i.market_value));
+
+// ---------- Views ----------
+const lastMonths = n => { const [y, m] = nowStr().split('-').map(Number); return [...Array(n)].map((_, i) => new Date(Date.UTC(y, m - 1 - (n - 1 - i), 1)).toISOString().slice(0, 10)); };
+const cumNet = end => S.ops.filter(o => o.occurred_on <= end).reduce((a, o) => a + (o.kind === 'aporte' ? 1 : -1) * F.toCents(o.amount), 0);
+const empty = (t, btn) => `<div class="card empty"><p>${t}</p>${btn || ''}</div>`;
+function vDash() {
+  const cur = nowStr(), sm = S.f._.m || cur.slice(0, 7), t = sm === cur.slice(0, 7) ? cur : F.monthRange(sm + '-01').end, p = S.f._.p || 'month', r = F.periodRange(p, t), wk = F.weekRange(t);
+  const inc = F.sumBy(S.tx, { type: 'income', status: 'settled', range: r }), exp = F.sumBy(S.tx, { type: 'expense', status: 'settled', range: r });
+  const b = budget(), net = S.inv.reduce((a, i) => a + invStats(i).net, 0);
+  const pat = b.input.balance + S.inv.reduce((a, i) => a + (i.market_value != null ? F.toCents(i.market_value) : invStats(i).net), 0);
+  const mv = S.inv.filter(i => i.market_value != null).reduce((a, i) => a + F.toCents(i.market_value), 0);
+  const wkInc = F.sumBy(S.tx, { type: 'income', status: 'settled', range: wk });
+  const goal = F.toCents(S.prefs.savings_goal || 0), saved = goal - b.remainSave;
+  const pct = goal > 0 ? Math.min(100, Math.round(saved / goal * 100)) : 0;
+  const upcoming = S.tx.filter(x => x.type === 'expense' && x.status === 'pending' && (x.due_on || x.occurred_on) >= t).sort((a, c) => (a.due_on || a.occurred_on).localeCompare(c.due_on || c.occurred_on)).slice(0, 5);
+  const byCat = {}; S.tx.filter(x => x.type === 'expense' && x.status === 'settled' && F.inRange(x.occurred_on, r)).forEach(x => byCat[x.category || 'Outros'] = (byCat[x.category || 'Outros'] || 0) + F.toCents(x.amount) / 100);
+  const months = [...Array(6)].map((_, i) => { const [y, m] = t.split('-').map(Number); const d = new Date(Date.UTC(y, m - 1 - (5 - i), 1)); return d.toISOString().slice(0, 10); });
+  after(() => {
+    chart('c1', { type: 'bar', data: { labels: months.map(m => m.slice(5, 7) + '/' + m.slice(0, 4)), datasets: [{ label: 'Receitas', backgroundColor: '#2ecc8f', data: months.map(m => F.sumBy(S.tx, { type: 'income', status: 'settled', range: F.monthRange(m) }) / 100) }, { label: 'Despesas', backgroundColor: '#e5707a', data: months.map(m => F.sumBy(S.tx, { type: 'expense', status: 'settled', range: F.monthRange(m) }) / 100) }] } });
+    chart('c2', { type: 'doughnut', data: { labels: Object.keys(byCat), datasets: [{ data: Object.values(byCat), backgroundColor: COLORS }] } });
+  });
+  after(() => chart('c3', { type: 'line', data: { labels: months.map(m => m.slice(5, 7) + '/' + m.slice(0, 4)), datasets: [{ label: 'Patrimônio (saldo + custo investido)', borderColor: '#2ecc8f', data: months.map(m => { const e = F.monthRange(m).end; return (F.balances(S.accounts, S.tx.filter(x => x.occurred_on <= e)).total + cumNet(e)) / 100; }) }, { label: 'Investido (custo líquido)', borderColor: '#6ea8e8', data: months.map(m => cumNet(F.monthRange(m).end) / 100) }] } }));
+  if (!S.tx.length && !S.inv.length) return `<h2>Dashboard</h2>${empty('Primeiro acesso: informe o saldo inicial da conta em Configurações e registre seu primeiro lançamento.', quick())}`;
+  return `<div class="bar-top"><h2>Dashboard</h2><div class="row"><label>Mês<input type="month" data-k="_" data-f="m" value="${sm}"></label><label>Período<select data-k="_" data-f="p">${[['week', 'Semana'], ['month', 'Mês'], ['quarter', 'Trimestre'], ['year', 'Ano']].map(([v, l]) => `<option value="${v}" ${p === v ? 'selected' : ''}>${l}</option>`).join('')}</select></label></div></div>${quick()}
+  <div class="grid">${kpi('Patrimônio total', $m(pat), 'pos')}${kpi('Dinheiro disponível (saldo real)', $m(b.input.balance))}${kpi('Receitas recebidas', $m(inc), 'pos')}${kpi('Despesas pagas', $m(exp), 'neg')}${kpi('Ganhos da semana', $m(wkInc), 'pos')}${kpi('Quanto ainda posso gastar', $m(b.free), b.free < 0 ? 'neg' : 'info')}${kpi('Investido (custo líquido)', $m(net))}${kpi('Valor informado da carteira', mv ? $m(mv) : '—')}</div>
+  <div class="card"><h3>Meta de economia do mês</h3><div class="bar"><i style="width:${pct}%"></i></div><small class="muted">${goal ? `${$m(Math.max(0, saved))} de ${$m(goal)} (${pct}%)` : 'Defina a meta em "Quanto posso gastar".'}</small></div>
+  <div class="grid two"><div class="card"><h3>Receitas × despesas (6 meses)</h3><canvas id="c1"></canvas></div><div class="card"><h3>Despesas por categoria</h3>${Object.keys(byCat).length ? '<canvas id="c2"></canvas>' : '<p class="empty">Sem despesas pagas no período.</p>'}</div></div>
+  <div class="card"><h3>Evolução do patrimônio</h3><canvas id="c3"></canvas></div>
+  <div class="grid two"><div class="card"><h3>Últimas movimentações</h3>${S.tx.slice(0, 6).map(x => `<p>${$d(x.occurred_on)} · ${esc(x.description)} <span class="n ${x.type === 'income' ? 'pos' : 'neg'}" style="float:right">${$m(F.toCents(x.amount))}</span></p>`).join('')}</div>
+  <div class="card"><h3>Próximas contas a vencer</h3>${upcoming.map(x => `<p>${$d(x.due_on || x.occurred_on)} · ${esc(x.description)} <span class="n" style="float:right">${$m(F.toCents(x.amount))}</span></p>`).join('') || '<p class="muted">Nenhuma conta pendente.</p>'}</div></div>`;
+}
+const quick = () => `<div class="row"><button class="btn" data-act="tx-new" data-kind="income">+ Receita</button><button class="btn" data-act="tx-new" data-kind="expense">+ Despesa</button><button class="btn" data-act="inv-op" data-kind="aporte">+ Aporte</button><button class="ghost" data-act="inv-op" data-kind="resgate">Resgate</button></div>`;
+
+function vTx(kind) {
+  const exp = kind === 'expense', f = S.f[kind], t = nowStr(), month = f.month || t.slice(0, 7), mr = F.monthRange(month + '-01');
+  const all = S.tx.filter(x => x.type === kind);
+  const rows = all.filter(x => (f.from || f.to ? (!f.from || x.occurred_on >= f.from) && (!f.to || x.occurred_on <= f.to) : x.occurred_on.startsWith(month)) && (!f.cat || x.category === f.cat) && (f.st ? x.status === f.st : x.status !== 'canceled') && (!f.q || x.description.toLowerCase().includes(f.q.toLowerCase())));
+  const sum = s => F.sumBy(rows, { status: s });
+  let extra = '';
+  if (exp) {
+    const prev = F.monthRange(F.addDays(mr.start, -1)), cur = F.sumBy(all, { status: 'settled', range: mr }), pv = F.sumBy(all, { status: 'settled', range: prev });
+    const cats = {}; rows.filter(x => x.status === 'settled').forEach(x => cats[x.category || 'Outros'] = (cats[x.category || 'Outros'] || 0) + F.toCents(x.amount));
+    const top = Object.entries(cats).sort((a, b) => b[1] - a[1]).slice(0, 3);
+    extra = `<div class="grid two"><div class="card"><h3>Comparação com mês anterior</h3><p>Pago neste mês: <b>${$m(cur)}</b> · mês anterior: <b>${$m(pv)}</b></p></div><div class="card"><h3>Categorias que mais consomem</h3>${top.map(([c, v]) => `<p>${esc(c)} <b style="float:right">${$m(v)}</b></p>`).join('') || '<p class="muted">Sem dados.</p>'}</div></div>`;
+  } else {
+    const w = F.weeklyStats(all, mr), wk = F.weekRange(t), pw = F.weekRange(F.addDays(wk.start, -1));
+    const thisW = F.sumBy(all, { status: 'settled', range: wk }), prevW = F.sumBy(all, { status: 'settled', range: pw });
+    after(() => chart('cw', { type: 'bar', data: { labels: w.weeks.map(x => $d(x.start).slice(0, 5)), datasets: [{ label: 'Recebido', backgroundColor: '#2ecc8f', data: w.weeks.map(x => x.total / 100) }] } }));
+    extra = `<div class="grid">${kpi('Recebido nesta semana (seg–dom)', $m(thisW), 'pos')}${kpi('Semana anterior', $m(prevW))}${kpi('Média semanal no mês', $m(w.avg))}${kpi('Melhor / pior semana', `${$m(w.best?.total || 0)} / ${$m(w.worst?.total || 0)}`)}</div><div class="card"><h3>Ganhos por semana</h3><canvas id="cw"></canvas></div>`;
+  }
+  return `<div class="bar-top"><h2>${exp ? 'Gastos do mês' : 'Ganhos da semana'}</h2><button class="btn" data-act="tx-new" data-kind="${kind}">${exp ? '+ Despesa' : '+ Ganho'}</button></div>
+  ${exp ? limitBanner() : ''}<div class="row card">${`<label>Mês<input type="month" data-k="${kind}" data-f="month" value="${month}"></label>`}${sel(kind, 'cat', 'Categoria', CAT[kind])}<label>De<input type="date" data-k="${kind}" data-f="from" value="${f.from || ''}"></label><label>Até<input type="date" data-k="${kind}" data-f="to" value="${f.to || ''}"></label>${sel(kind, 'st', 'Status', ST[kind])}<label>Buscar<input type="search" data-k="${kind}" data-f="q" value="${esc(f.q || '')}" placeholder="Descrição"></label></div>
+  <div class="grid">${kpi(exp ? 'Pagas' : 'Recebidos', $m(sum('settled')), exp ? 'neg' : 'pos')}${exp ? kpi('Pendentes', $m(sum('pending'))) : ''}${kpi(exp ? 'Previstas (compromissos futuros)' : 'Previstos (ainda não recebidos)', $m(sum('planned')), 'info')}</div>${extra}
+  ${rows.length ? `<div class="card scroll"><table><thead><tr><th>Data</th><th>Descrição</th><th>Categoria</th><th>Status</th><th class="n">Valor</th><th></th></tr></thead><tbody>${rows.map(x => `<tr><td>${$d(x.occurred_on)}${x.due_on ? `<br><small class="muted">vence ${$d(x.due_on)}</small>` : ''}</td><td>${esc(x.description)}${x.notes ? `<br><small class="muted">${esc(x.notes)}</small>` : ''}</td><td>${esc(x.category)}</td><td><span class="pill ${x.status}">${stLabel(kind, x.status)}</span></td><td class="n ${exp ? 'neg' : 'pos'}">${$m(F.toCents(x.amount))}</td><td><button data-act="tx-edit" data-id="${x.id}">Editar</button> ${x.status !== 'canceled' ? `<button data-act="tx-cancel" data-id="${x.id}">Excluir</button>` : ''}</td></tr>`).join('')}</tbody></table></div>` : empty('Nenhum lançamento neste filtro.', `<button class="btn" data-act="tx-new" data-kind="${kind}">Registrar o primeiro</button>`)}`;
+}
+function limitBanner() {
+  const b = budget(), lim = b.input.limit;
+  if (!lim) return '<p class="muted">Defina um limite mensal em "Quanto posso gastar" para receber alertas.</p>';
+  const pct = Math.round(b.input.paid / lim * 100), c = pct >= 100 ? 'bad' : pct >= 80 ? 'warn' : '';
+  return `<div class="card limit" role="status"><h3>Limite mensal: ${$m(b.input.paid)} de ${$m(lim)} (${pct}%)</h3><div class="bar ${c}"><i style="width:${Math.min(100, pct)}%"></i></div>${pct >= 100 ? `<p class="neg">Limite ultrapassado em ${$m(b.input.paid - lim)}.</p>` : pct >= 80 ? '<p class="warn">Atenção: você está perto do limite.</p>' : ''}</div>`;
+}
+function txForm(kind, x) {
+  const exp = kind === 'expense';
+  form(`${x ? 'Editar' : 'Novo'} ${exp ? 'gasto' : 'ganho'}`, [
+    { name: 'description', label: 'Descrição', req: 1 }, { name: 'amount', label: 'Valor (R$)', type: 'number', req: 1, min: 0.01 },
+    { name: 'category', label: 'Categoria', type: 'select', options: CAT[kind], req: 1 }, { name: 'occurred_on', label: exp ? 'Data da despesa' : 'Data de recebimento', type: 'date', req: 1, def: nowStr() },
+    ...(exp ? [{ name: 'due_on', label: 'Vencimento (opcional)', type: 'date' }, { name: 'payment_method', label: 'Forma de pagamento (opcional)' }] : []),
+    { name: 'account_id', label: 'Conta', type: 'select', options: accOpts(), req: 1 },
+    { name: 'status', label: 'Status', type: 'select', options: ST[kind].filter(s => s[0] !== 'canceled'), req: 1, def: 'settled' }, { name: 'notes', label: 'Observações (opcional)' },
+    ...(exp ? [] : [{ name: 'reliable', label: 'Se prevista: é confiável?', type: 'select', options: [['false', 'Não'], ['true', 'Sim']] }]),
+  ], x, async o => {
+    const row = { description: o.description.trim(), amount: Number(o.amount), category: o.category, occurred_on: o.occurred_on, due_on: nn(o.due_on), payment_method: nn(o.payment_method), account_id: o.account_id, status: o.status, notes: nn(o.notes), reliable: o.reliable === 'true' };
+    if (!(row.amount > 0)) throw new Error('Informe um valor maior que zero.');
+    await q(x ? db.from('transactions').update(row).eq('id', x.id) : db.from('transactions').insert({ ...row, user_id: S.user.id, type: kind }));
+  });
+}
+
+function vInv() {
+  const mv = S.inv.filter(i => i.market_value != null).reduce((a, i) => a + F.toCents(i.market_value), 0);
+  const tot = F.portfolioStats(S.ops, null), cats = {};
+  S.inv.forEach(i => cats[i.category] = (cats[i.category] || 0) + Math.max(0, invStats(i).net) / 100);
+  after(() => chart('ci', { type: 'doughnut', data: { labels: Object.keys(cats), datasets: [{ data: Object.values(cats), backgroundColor: COLORS }] } }));
+  after(() => chart('ce', { type: 'line', data: { labels: lastMonths(12).map(m => m.slice(5, 7) + '/' + m.slice(2, 4)), datasets: [{ label: 'Custo líquido investido', borderColor: '#2ecc8f', data: lastMonths(12).map(m => cumNet(F.monthRange(m).end) / 100) }] } }));
+  const fc = S.f._.ic || '';
+  const list = S.inv.filter(i => !fc || i.category === fc);
+  return `<div class="bar-top"><h2>Investimentos</h2><div class="row"><button class="btn" data-act="inv-new">+ Investimento</button><button class="ghost" data-act="inv-op" data-kind="aporte">Aporte</button><button class="ghost" data-act="inv-op" data-kind="resgate">Resgate</button></div></div>
+  <div class="grid">${kpi('Total aportado', $m(tot.contributions))}${kpi('Total resgatado', $m(tot.redemptions))}${kpi('Custo líquido', $m(tot.net))}${kpi('Valor informado', mv ? $m(mv) : '—', 'info')}</div>
+  <p class="muted">Valores de mercado são informados manualmente (sem cotação automática); a data da última atualização aparece na tabela. Ganho = valor atual + resgatado − aportado; aportes não são lucro.</p>
+  <div class="row card"><label>Categoria<select data-k="_" data-f="ic"><option value="">Todas</option>${CAT.inv.map(c => `<option ${fc === c ? 'selected' : ''}>${c}</option>`).join('')}</select></label></div>
+  ${list.length ? `<div class="grid two"><div class="card scroll"><table><thead><tr><th>Ativo</th><th class="n">Custo líq.</th><th class="n">Valor atual</th><th class="n">Ganho</th><th class="n">Rent.</th><th></th></tr></thead><tbody>${list.map(i => { const s = invStats(i); return `<tr><td>${esc(i.name)}<br><small class="muted">${esc(i.category)}${i.institution ? ' · ' + esc(i.institution) : ''}</small></td><td class="n">${$m(s.net)}</td><td class="n">${i.market_value == null ? '—' : $m(F.toCents(i.market_value)) + `<br><small class="muted">${$d(i.market_value_at)}</small>`}</td><td class="n ${s.gain > 0 ? 'pos' : s.gain < 0 ? 'neg' : ''}">${s.gain == null ? '—' : $m(s.gain)}</td><td class="n">${s.ret == null ? '—' : (s.ret * 100).toFixed(2).replace('.', ',') + '%'}</td><td><button data-act="inv-edit" data-id="${i.id}">Editar</button> <button data-act="inv-op" data-kind="aporte" data-id="${i.id}">Aportar</button> <button data-act="inv-del" data-id="${i.id}">Excluir</button></td></tr>`; }).join('')}</tbody></table></div><div class="card"><h3>Distribuição por custo líquido</h3><canvas id="ci"></canvas></div></div>` : empty('Nenhum investimento cadastrado.', '<button class="btn" data-act="inv-new">Cadastrar investimento</button>')}
+  <div class="card"><h3>Evolução do custo líquido investido (aportes − resgates)</h3><canvas id="ce"></canvas></div><div class="card scroll"><h3>Histórico de operações</h3><table><tbody>${S.ops.slice().sort((a, b) => b.occurred_on.localeCompare(a.occurred_on)).map(o => `<tr><td>${$d(o.occurred_on)}</td><td>${esc(S.inv.find(i => i.id === o.investment_id)?.name)}</td><td>${o.kind === 'aporte' ? 'Aporte' : 'Resgate'}</td><td class="n">${$m(F.toCents(o.amount))}</td></tr>`).join('') || '<tr><td class="muted">Sem operações.</td></tr>'}</tbody></table></div>`;
+}
+function invForm(i) {
+  form(i ? 'Editar investimento' : 'Novo investimento', [
+    { name: 'name', label: 'Nome ou ativo', req: 1 }, { name: 'category', label: 'Categoria', type: 'select', options: CAT.inv, req: 1 }, { name: 'institution', label: 'Instituição (opcional)' },
+    { name: 'first_date', label: 'Data da primeira aplicação', type: 'date' }, { name: 'quantity', label: 'Quantidade (opcional)', type: 'number', step: 'any' }, { name: 'avg_price', label: 'Preço médio (opcional)', type: 'number', step: 'any' },
+    { name: 'market_value', label: 'Valor de mercado atual (informado por você)', type: 'number' }, { name: 'notes', label: 'Observações' },
+    ...(i ? [] : [{ name: 'initial_amount', label: 'Valor investido inicial (R$, lançado como aporte)', type: 'number' }, { name: 'initial_account', label: 'Conta debitada pelo aporte inicial', type: 'select', options: accOpts() }]),
+  ], i, async o => {
+    const mvChanged = nn(o.market_value) !== (i?.market_value == null ? null : String(i.market_value));
+    const row = { name: o.name.trim(), category: o.category, institution: nn(o.institution), first_date: nn(o.first_date), quantity: nn(o.quantity), avg_price: nn(o.avg_price), market_value: nn(o.market_value), notes: nn(o.notes) };
+    if (mvChanged) row.market_value_at = nowStr();
+    if (i) return void await q(db.from('investments').update(row).eq('id', i.id));
+    const [rec] = await q(db.from('investments').insert({ ...row, user_id: S.user.id }).select());
+    if (o.initial_amount) await q(db.rpc('invest_op', { p_investment: rec.id, p_kind: 'aporte', p_amount: +o.initial_amount, p_date: o.first_date || nowStr(), p_account: o.initial_account }));
+  });
+}
+function invOp(kind, id) {
+  if (!S.inv.length) return toast('Cadastre um investimento primeiro.', 1);
+  form(kind === 'aporte' ? 'Registrar aporte' : 'Registrar resgate', [
+    { name: 'investment_id', label: 'Investimento', type: 'select', options: S.inv.map(i => [i.id, i.name]), req: 1 }, { name: 'amount', label: 'Valor (R$)', type: 'number', req: 1, min: 0.01 },
+    { name: 'date', label: 'Data', type: 'date', req: 1, def: nowStr() }, { name: 'account_id', label: kind === 'aporte' ? 'Conta de origem' : 'Conta de destino', type: 'select', options: accOpts(), req: 1 },
+  ], { investment_id: id }, async o => {
+    const inv = S.inv.find(i => i.id === o.investment_id), s = invStats(inv), amt = F.toCents(o.amount);
+    if (amt <= 0) throw new Error('Informe um valor maior que zero.');
+    if (kind === 'resgate') { const lim = inv.market_value != null ? F.toCents(inv.market_value) : s.net; if (amt > lim) throw new Error('Resgate maior que o valor disponível: ' + $m(lim)); }
+    await q(db.rpc('invest_op', { p_investment: o.investment_id, p_kind: kind, p_amount: amt / 100, p_date: o.date, p_account: o.account_id }));
+  });
+}
+
+function vBudget() {
+  const b = budget(), p = S.prefs, a = b.alert;
+  const avg = Math.round(b.input.paid / (F.daysBetween(F.monthRange(nowStr()).start, nowStr()) + 1));
+  after(() => { const inp = $('#simv'); if (inp) inp.oninput = () => { const s = budget(inp.value); $('#simout').innerHTML = `Orçamento livre: <b class="${s.free < 0 ? 'neg' : 'pos'}">${$m(s.free)}</b> · por dia: <b>${$m(s.daily)}</b> · por semana: <b>${$m(s.weekly)}</b>${s.exceeded ? `<br><span class="neg">Excedido em ${$m(s.exceeded)}</span>` : ''}`; }; });
+  return `<div class="bar-top"><h2>Quanto posso gastar</h2><button class="btn" data-act="prefs">Configurar planejamento</button></div>
+  ${a ? `<div class="alert a${a}" role="status">Você já usou ${Math.round(b.usage * 100)}% do limite mensal de despesas${a === 100 ? ' — limite atingido' : ''}.</div>` : ''}
+  ${b.exceeded ? `<div class="alert a100" role="alert">Orçamento negativo: excedido em <b>${$m(b.exceeded)}</b>.</div>` : ''}
+  <div class="grid">${kpi('Quanto tenho (saldo real)', $m(b.input.balance))}${kpi('Receitas previstas confiáveis', $m(b.reliable), 'info')}${kpi('Já gastei no mês', $m(b.input.paid), 'neg')}${kpi('Comprometido (pendente/previsto)', $m(b.pending))}${kpi('Reservas (emergência + metas + investimento do mês)', $m(b.input.reserve))}</div>
+  <div class="grid">${kpi('Posso gastar neste mês', $m(b.free), b.free < 0 ? 'neg' : 'pos')}${kpi(`Por dia (${b.remainingDays} dias restantes)`, $m(b.daily))}${kpi('Por semana', $m(b.weekly))}${kpi('Média de gastos por dia (mês)', $m(avg))}${kpi('Preciso guardar ainda este mês', $m(b.remainSave), 'info')}</div>
+  <div class="card"><h3>Orçamento projetado (estimativa)</h3><p><b>${$m(b.projected)}</b> se também forem recebidas as demais receitas previstas (não marcadas como confiáveis), que não são dinheiro disponível hoje.</p><small class="muted">Livre = saldo real + receitas previstas confiáveis − pendentes − reservas (emergência, metas e investimento do mês). Despesas já pagas já saíram do saldo, então não são descontadas de novo.</small></div>
+  <div class="card"><h3>Simulador de nova despesa</h3><label>Valor (R$)<input id="simv" type="number" min="0" step="0.01" placeholder="0,00"></label><p id="simout" class="muted">Digite um valor para ver o impacto.</p></div>`;
+}
+function prefsForm() {
+  const p = S.prefs;
+  form('Planejamento', [
+    { name: 'monthly_income', label: 'Renda mensal esperada (R$)', type: 'number' }, { name: 'savings_goal', label: 'Meta de economia mensal (R$)', type: 'number' },
+    { name: 'expense_limit', label: 'Limite mensal de despesas (R$)', type: 'number' }, { name: 'emergency_reserve', label: 'Reserva de emergência fora das metas (R$)', type: 'number' }, { name: 'investment_reserve', label: 'Valor a investir por mês (R$)', type: 'number' }, { name: 'plan_start', label: 'Início do planejamento', type: 'date' },
+  ], p, async o => { await q(db.from('user_preferences').update({ monthly_income: +o.monthly_income || 0, savings_goal: +o.savings_goal || 0, expense_limit: +o.expense_limit || 0, emergency_reserve: +o.emergency_reserve || 0, investment_reserve: +o.investment_reserve || 0, plan_start: nn(o.plan_start) }).eq('user_id', S.user.id)); });
+}
+
+function vGoals() {
+  const t = nowStr();
+  return `<div class="bar-top"><h2>Metas financeiras</h2><button class="btn" data-act="goal-new">+ Meta</button></div>
+  <p class="muted">O valor reservado já está dentro das suas contas: ele é descontado do orçamento livre, mas não soma ao saldo.</p>
+  ${S.goals.length ? `<div class="grid two">${S.goals.map(g => { const pct = Math.min(100, Math.round(F.toCents(g.saved_amount) / F.toCents(g.target_amount) * 100)), rest = Math.max(0, F.toCents(g.target_amount) - F.toCents(g.saved_amount)); return `<div class="card"><h3>${esc(g.name)} · prioridade ${esc(g.priority)}</h3><div class="bar"><i style="width:${pct}%"></i></div><p>${pct}% · reservado ${$m(F.toCents(g.saved_amount))} de ${$m(F.toCents(g.target_amount))}<br>Faltam <b>${$m(rest)}</b> até ${$d(g.deadline)}<br>Contribuição mensal sugerida (estimativa): <b>${$m(F.goalMonthly({ target: g.target_amount, saved: g.saved_amount, deadline: g.deadline, today: t }))}</b></p><button class="ghost" data-act="goal-edit" data-id="${g.id}">Editar</button> <button class="ghost" data-act="goal-del" data-id="${g.id}">Excluir</button></div>`; }).join('')}</div>` : empty('Nenhuma meta criada.', '<button class="btn" data-act="goal-new">Criar meta</button>')}`;
+}
+function goalForm(g) {
+  form(g ? 'Editar meta' : 'Nova meta', [
+    { name: 'name', label: 'Nome', req: 1 }, { name: 'target_amount', label: 'Valor desejado (R$)', type: 'number', req: 1, min: 0.01 }, { name: 'saved_amount', label: 'Valor já reservado (R$)', type: 'number' },
+    { name: 'deadline', label: 'Prazo', type: 'date', req: 1 }, { name: 'priority', label: 'Prioridade', type: 'select', options: [['baixa', 'Baixa'], ['media', 'Média'], ['alta', 'Alta']], def: 'media' }, { name: 'description', label: 'Descrição' },
+  ], g, async o => { const row = { name: o.name.trim(), target_amount: +o.target_amount, saved_amount: +o.saved_amount || 0, deadline: o.deadline, priority: o.priority, description: nn(o.description) }; await q(g ? db.from('financial_goals').update(row).eq('id', g.id) : db.from('financial_goals').insert({ ...row, user_id: S.user.id })); });
+}
+
+function vReports() {
+  const t = nowStr(), ms = [...Array(12)].map((_, i) => { const [y, m] = t.split('-').map(Number); return new Date(Date.UTC(y, m - 1 - i, 1)).toISOString().slice(0, 10); });
+  return `<div class="bar-top"><h2>Histórico e relatórios</h2><div class="row"><button class="btn" data-act="csv-tx">Exportar movimentações (CSV)</button><button class="ghost" data-act="csv-ops">Exportar aportes/resgates (CSV)</button></div></div>
+  <div class="card scroll"><h3>Fechamento mensal (últimos 12 meses, efetivado)</h3><table><thead><tr><th>Mês</th><th class="n">Receitas</th><th class="n">Despesas</th><th class="n">Resultado</th></tr></thead><tbody>${ms.map(m => { const r = F.monthRange(m), i = F.sumBy(S.tx, { type: 'income', status: 'settled', range: r }), e = F.sumBy(S.tx, { type: 'expense', status: 'settled', range: r }); return `<tr><td>${m.slice(5, 7)}/${m.slice(0, 4)}</td><td class="n pos">${$m(i)}</td><td class="n neg">${$m(e)}</td><td class="n">${$m(i - e)}</td></tr>`; }).join('')}</tbody></table></div>`;
+}
+function download(name, text) { const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([text], { type: name.endsWith('.json') ? 'application/json' : 'text/csv;charset=utf-8' })); a.download = name; a.click(); URL.revokeObjectURL(a.href); }
+const brNum = c => (c / 100).toFixed(2).replace('.', ',');
+
+function vConfig() {
+  return `<h2>Configurações</h2><div class="card"><h3>Conta</h3><p>${esc(S.user.email)}</p><div class="row"><button class="ghost" data-act="reset-pw">Enviar e-mail de redefinição de senha</button><button class="ghost" data-act="backup">Baixar backup (JSON)</button><button class="ghost" data-act="logout">Sair</button></div></div>
+  <div class="card"><div class="bar-top"><h3>Contas financeiras</h3><button class="ghost" data-act="acc-new">+ Conta</button></div><p class="muted">O saldo real é o saldo inicial + movimentações efetivadas.</p>${S.accounts.map(a => `<p>${esc(a.name)} · saldo inicial ${$m(F.toCents(a.opening_balance))} · saldo atual <b>${$m(F.balances(S.accounts, S.tx).by[a.id])}</b> <button class="ghost" data-act="acc-edit" data-id="${a.id}">Editar</button></p>`).join('')}</div>`;
+}
+const accForm = a => form(a ? 'Editar conta' : 'Nova conta', [{ name: 'name', label: 'Nome', req: 1 }, { name: 'opening_balance', label: 'Saldo inicial (R$)', type: 'number', min: -1e9 }], a, async o => { const row = { name: o.name.trim(), opening_balance: +o.opening_balance || 0 }; await q(a ? db.from('financial_accounts').update(row).eq('id', a.id) : db.from('financial_accounts').insert({ ...row, user_id: S.user.id })); });
+
+// ---------- Ações ----------
+const find = (arr, id) => arr.find(x => x.id === id);
+const del = async (table, id, msg) => { if (await ask(msg)) { await q(db.from(table).delete().eq('id', id)); await refresh(); toast('Excluído.'); } };
+const ACT = {
+  'tx-new': (_, b) => txForm(b.dataset.kind),
+  'tx-edit': id => { const x = find(S.tx, id); txForm(x.type, x); },
+  'tx-cancel': async id => { if (await ask('Excluir este lançamento? Ele sai da lista e dos totais; fica guardado como cancelado (filtro Status) para auditoria.')) { await q(db.from('transactions').update({ status: 'canceled', canceled_at: new Date().toISOString() }).eq('id', id)); await refresh(); toast('Lançamento excluído.'); } },
+  'inv-new': () => invForm(), 'inv-edit': id => invForm(find(S.inv, id)), 'inv-op': (id, b) => invOp(b.dataset.kind, id),
+  'inv-del': id => del('investments', id, 'Excluir investimento? (só é possível se não houver operações)'),
+  prefs: prefsForm, 'goal-new': () => goalForm(), 'goal-edit': id => goalForm(find(S.goals, id)), 'goal-del': id => del('financial_goals', id, 'Excluir esta meta?'),
+  'acc-new': () => accForm(), 'acc-edit': id => accForm(find(S.accounts, id)),
+  'csv-tx': () => download('movimentacoes.csv', F.toCSV(S.tx, [['Data', r => $d(r.occurred_on)], ['Tipo', r => TYPE[r.type]], ['Descrição', r => r.description], ['Categoria', r => r.category], ['Status', r => stLabel(r.type === 'income' ? 'income' : 'expense', r.status)], ['Valor (R$)', r => brNum(F.toCents(r.amount))], ['Conta', r => find(S.accounts, r.account_id)?.name]])),
+  'csv-ops': () => download('aportes-resgates.csv', F.toCSV(S.ops, [['Data', r => $d(r.occurred_on)], ['Investimento', r => find(S.inv, r.investment_id)?.name], ['Operação', r => r.kind], ['Valor (R$)', r => brNum(F.toCents(r.amount))]])),
+  'reset-pw': async () => { await q(db.auth.resetPasswordForEmail(S.user.email, { redirectTo: location.href.split('#')[0] })); toast('E-mail de redefinição enviado.'); },
+  logout: async () => { await db.auth.signOut(); },
+};
+document.addEventListener('click', async e => { const b = e.target.closest('[data-act]'); if (!b) return; try { await ACT[b.dataset.act]?.(b.dataset.id, b); } catch (x) { toast(x.message, 1); } });
+document.addEventListener('input', e => { if (e.target.matches?.('[data-money]')) e.target.value = mask(e.target.value, e.target.hasAttribute('data-neg')); });
+document.addEventListener('change', e => { const el = e.target.closest('[data-f]'); if (el) { S.f[el.dataset.k][el.dataset.f] = el.value; render(); } });
+
+// ---------- Render ----------
+let afters = []; const after = fn => afters.push(fn);
+const VIEWS = { dashboard: vDash, investimentos: vInv, gastos: () => vTx('expense'), orcamento: vBudget, ganhos: () => vTx('income'), metas: vGoals, relatorios: vReports, config: vConfig };
+function render() {
+  $('#nav').innerHTML = '<b>Finance OS</b>' + NAV.map(([k, l]) => `<button data-nav="${k}" ${S.view === k ? 'aria-current="page"' : ''}>${l}</button>`).join('') + '<button data-act="eye">Ocultar valores</button>';
+  afters = [];
+  $('#main').innerHTML = S.err ? `<div class="card"><p class="err">Erro ao carregar dados: ${esc(S.err)}</p><button class="btn" data-act="reload">Tentar novamente</button></div>` : VIEWS[S.view]();
+  afters.forEach(f => f());
+}
+ACT.reload = refresh;
+ACT.backup = () => download('finance-os-backup.json', JSON.stringify({ exportado_em: new Date().toISOString(), contas: S.accounts, movimentacoes: S.tx, investimentos: S.inv, operacoes_investimento: S.ops, metas: S.goals, preferencias: S.prefs }, null, 1));
+ACT.eye = () => { document.body.classList.toggle('hide'); try { localStorage.setItem('hide', document.body.classList.contains('hide') ? '1' : ''); } catch {} };
+try { if (localStorage.getItem('hide')) document.body.classList.add('hide'); } catch {}
+$('#nav').addEventListener('click', e => { const b = e.target.closest('[data-nav]'); if (b) { S.view = b.dataset.nav; render(); $('#main').focus(); } });
+if (window.Chart) { Chart.defaults.color = '#8fa1b5'; Chart.defaults.borderColor = '#243040'; }
+
+// ---------- Autenticação ----------
+function setUser(u) {
+  if ((u?.id || null) === (S.user?.id || null)) return;
+  S.user = u || null; $('#auth').hidden = !!u; $('#app').hidden = !u;
+  if (u) { $('#main').innerHTML = '<p class="empty">Carregando…</p>'; refresh(); }
+}
+$('#authForm').addEventListener('click', async e => {
+  const b = e.target.closest('[data-auth]'); if (!b) return; e.preventDefault();
+  const f = $('#authForm'), email = f.email.value.trim(), password = f.password.value, err = $('#authErr'); err.textContent = '';
+  if (!configured) { err.textContent = 'Configure o Supabase em js/config.js antes de usar.'; return; }
+  try {
+    if (b.dataset.auth === 'reset') { if (!email) throw new Error('Informe seu e-mail.'); await q(db.auth.resetPasswordForEmail(email, { redirectTo: location.href.split('#')[0] })); toast('Se o e-mail existir, enviaremos o link de redefinição.'); return; }
+    if (!f.reportValidity()) return;
+    if (b.dataset.auth === 'signup') { const r = await q(db.auth.signUp({ email, password })); if (!r.session) toast('Conta criada. Confirme o e-mail para entrar.'); }
+    else await q(db.auth.signInWithPassword({ email, password }));
+  } catch (x) { err.textContent = x.message; }
+});
+async function newPassword() {
+  form('Defina uma nova senha', [{ name: 'password', label: 'Nova senha (mín. 8 caracteres)', type: 'password', req: 1 }], {}, async o => { if (o.password.length < 8) throw new Error('A senha deve ter ao menos 8 caracteres.'); await q(db.auth.updateUser({ password: o.password })); });
+}
+(async () => {
+  if (!configured) { $('#auth').hidden = false; $('#cfgWarn').hidden = false; return; }
+  const { data } = await db.auth.getSession(); setUser(data.session?.user);
+  if (!data.session) $('#auth').hidden = false;
+  db.auth.onAuthStateChange((ev, s) => { if (ev === 'PASSWORD_RECOVERY') newPassword(); setUser(s?.user); if (!s) $('#auth').hidden = false; });
+})();
