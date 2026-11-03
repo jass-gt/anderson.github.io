@@ -52,3 +52,17 @@ canvas{max-height:260px}
  nav b{display:none}nav button{white-space:nowrap;font-size:.8rem;padding:.5rem .6rem}
  main#main{padding:1rem}
 }
+
+/* ===== Ajuste de proporção ===== */
+.app{grid-template-columns:clamp(190px,16vw,240px) minmax(0,1fr)}
+nav{height:100vh;height:100dvh}
+main#main{max-width:1600px;margin-inline:auto;min-width:0;padding:clamp(1rem,2.5vw,2rem)}
+.card{min-width:0}
+.grid.two{grid-template-columns:repeat(auto-fit,minmax(min(100%,320px),1fr))}
+.row>label{flex:1 1 140px}
+
+@media(max-width:800px){
+  nav{height:auto}
+  .grid{grid-template-columns:repeat(auto-fit,minmax(min(100%,150px),1fr))}
+  input,select{font-size:16px}
+}
