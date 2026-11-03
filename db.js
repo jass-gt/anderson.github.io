@@ -2,7 +2,7 @@
 // Use só a URL e a anon key aqui. Nunca coloque a senha do banco no front-end.
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
-const SUPABASE_URL = "https://SEU-PROJETO.supabase.co";
+const SUPABASE_URL = "https://agdnlftejngbmmqkawfw.supabase.co";
 const SUPABASE_ANON_KEY = "SUA_ANON_KEY";
 
 export const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
